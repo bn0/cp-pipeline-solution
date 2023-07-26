@@ -8,8 +8,8 @@ The project follows a monorepo structure, with services organized in separate di
 
 The CI/CD process is triggered when commits are pushed to specific branches in the repository:
 
-- `master` branch triggers the pipeline for the staging environment.
-- `production` branch triggers the pipeline for both staging and production environments.
+- `master` branch triggers the pipeline for the test environment.
+- `production` branch triggers the pipeline for test, staging and production environments.
 
 Any code linting is already handled by pre-commit scripts, ensuring code quality before it reaches the CI/CD pipeline.
 
