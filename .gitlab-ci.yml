@@ -1,0 +1,378 @@
+stages:
+  - dependency-image-build
+  - unit-test
+  - build
+  - security  # Not implemented
+  - deploy-test
+  - integration-test  # Not implemented
+  - e2e-test  # Not implemented
+  - deploy-staging  # Not implemented
+  - deploy-production
+  - release
+
+before_script:
+  - mkdir -p /kaniko/.docker/
+  - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+
+
+# ===============================================
+# dependency-image-build
+# ===============================================
+
+# Build base images with dependencies installed, to avoid lengthy installs if dependencies have not changed.
+
+dpnds-onprem-api-base:
+  stage: dependency-image-build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/onprem/services/api/
+      --dockerfile $CI_PROJECT_DIR/onprem/services/api/Dockerfile-base
+      --destination $CI_REGISTRY_IMAGE/onprem-api:base-$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/onprem-api:base
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - onprem/services/api/Dockerfile-base
+        - onprem/services/api/requirements.txt
+      when: on_success
+
+dpnds-onprem-webapp-base:
+  stage: dependency-image-build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/onprem/services/webapp/
+      --dockerfile $CI_PROJECT_DIR/onprem/services/webapp/Dockerfile-base
+      --destination $CI_REGISTRY_IMAGE/onprem-webapp:base-$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/onprem-webapp:base
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - onprem/services/webapp/Dockerfile-base
+        - onprem/services/webapp/.npmrc
+        - onprem/services/webapp/package*.json
+      when: on_success
+
+dpnds-cloud-webapp-base:
+  stage: dependency-image-build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/cloud/webapp/
+      --dockerfile $CI_PROJECT_DIR/cloud/webapp/Dockerfile
+      --destination $CI_REGISTRY_IMAGE/cloud-webapp:base-$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/cloud-webapp:base
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - cloud-webapp/Dockerfile
+        - cloud-webapp/.npmrc
+        - cloud-webapp/package*.json
+      when: on_success
+
+# etc...
+# Other dependency builds here, where required
+
+
+# ===============================================
+# unit-tests
+# ===============================================
+
+test-onprem-api:
+  stage: unit-tests
+  image:
+    # Not tagging the image is fine in this case: base image build is frequently skipped in the pipeline,
+    # and we have control over the "latest" image (no breaking changes introduced).
+    name: $CI_REGISTRY_IMAGE/onprem-api:base
+    entrypoint: [""]
+  before_script:
+    - echo "[test-onprem-api]"  # Override default before_script
+  script:
+    - set -o allexport; source $TEST_ENV; set +o allexport  # Set environment variables for test environment
+    - cd $CI_PROJECT_DIR/onprem/services/api
+    - python manage.py test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - onprem/services/api/**/*
+      when: on_success
+
+test-onprem-webapp:
+  stage: unit-tests
+  image:
+    name: $CI_REGISTRY_IMAGE/onprem-webapp:base
+    entrypoint: [""]
+  before_script:
+    - echo "[test-onprem-webapp]"
+  script:
+    - ln -s /src/node_modules $CI_PROJECT_DIR/onprem/services/webapp/node_modules
+    - cd $CI_PROJECT_DIR/onprem/services/webapp
+    - npm test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - onprem/services/webapp/**/*
+      when: on_success
+
+# etc...
+# Run other unit tests here
+
+
+# ===============================================
+# build
+# ===============================================
+
+onprem-api:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/onprem/services/api/
+      --dockerfile $CI_PROJECT_DIR/onprem/services/api/Dockerfile
+      --build-arg BASE_IMAGE=$CI_REGISTRY_IMAGE/onprem-api:base
+      --destination $CI_REGISTRY_IMAGE/onprem-api:$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/onprem-api:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      when: on_success
+
+onprem-webapp:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/onprem/services/webapp/
+      --dockerfile $CI_PROJECT_DIR/onprem/services/webapp/Dockerfile
+      --build-arg BASE_IMAGE=$CI_REGISTRY_IMAGE/cloud-webapp:base
+      --build-arg FONTAWESOME_NPM_AUTH_TOKEN=$FONTAWESOME_NPM_AUTH_TOKEN
+      --build-arg NODE_ENV=production
+      --destination $CI_REGISTRY_IMAGE/onprem-webapp:$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/onprem-webapp:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      when: on_success
+
+onprem-db:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/onprem/services/db/
+      --dockerfile $CI_PROJECT_DIR/onprem/services/db/Dockerfile
+      --destination $CI_REGISTRY_IMAGE/onprem-db:$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/onprem-db:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      when: on_success
+
+onprem-nginx:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=false --context $CI_PROJECT_DIR/onprem/services/nginx/
+      --dockerfile $CI_PROJECT_DIR/onprem/services/nginx/Dockerfile
+      --destination $CI_REGISTRY_IMAGE/onprem-nginx:$CI_COMMIT_SHORT_SHA
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      when: on_success
+
+# Build docker image for running Serverless Framework (https://www.serverless.com/) IaC deployments
+build-sls-deployment-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR/cloud/api/
+      --dockerfile $CI_PROJECT_DIR/cloud/api/Dockerfile
+      --destination $CI_REGISTRY_IMAGE/sls:$CI_COMMIT_SHORT_SHA
+      --destination $CI_REGISTRY_IMAGE/sls:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - api/Dockerfile
+        - api/package.json
+        - api/package-lock.json
+      when: on_success
+
+
+# ===============================================
+# security
+# ===============================================
+
+# Security scanning of images, dependencies, code e.g. using Snyk or similar
+
+
+# ===============================================
+# deploy-test
+# ===============================================
+
+test-deploy-cloud-api:
+  stage: test
+  environment: test
+  variables:
+    AWS_ACCESS_KEY_ID: $STG_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $STG_AWS_SECRET_ACCESS_KEY
+    AWS_REGION: "ap-southeast-2"
+    RELEASE: $CI_COMMIT_SHORT_SHA
+    SERVERLESS_ACCESS_KEY: $SERVERLESS_ACCESS_KEY
+  image:
+    name: $CI_REGISTRY_IMAGE/sls:latest
+  before_script:
+    - echo "[test-deploy-cloud-api]"
+  script:
+    - set -o allexport; source $SLS_ENV; set +o allexport
+    - ln -s /usr/src/node_modules $CI_PROJECT_DIR/cloud/api/node_modules
+    - cd $CI_PROJECT_DIR/cloud/api
+    - sls deploy -v --stage test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - api/**/*
+      when: on_success
+
+test-deploy-cloud-webapp:
+  stage: test
+  environment: test
+  variables:
+    AWS_ACCESS_KEY_ID: $STG_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $STG_AWS_SECRET_ACCESS_KEY
+    AWS_CF_DISTRIBUTION: $STG_AWS_CF_DISTRIBUTION
+  image:
+    name: $CI_REGISTRY_IMAGE/cloud-webapp:base
+    entrypoint: [""]
+  before_script:
+    - echo "[test-deploy-cloud-webapp]"
+  script:
+    - ln -s /src/node_modules $CI_PROJECT_DIR/cloud/webapp/node_modules
+    - cd $CI_PROJECT_DIR/cloud/webapp
+    - echo "build web app"
+    - npm run build
+    - echo "Sync web app files"
+    # Utilise npm package deploy-aws-s3-cloudfront (https://www.npmjs.com/package/deploy-aws-s3-cloudfront)
+    # to automatically take care of deployment, cache invalidations etc
+    - AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY deploy-aws-s3-cloudfront --bucket test.example.com --react --distribution $AWS_CF_DISTRIBUTION --debug --non-interactive
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "production"'
+      changes:
+        - client/**/*
+      when: on_success
+
+
+# ===============================================
+# Integration tests here
+# ===============================================
+
+# For cloud/microservice based services, the majority of testing should be performed here.
+
+
+# ===============================================
+# Acceptance (E2E) tests here
+# ===============================================
+
+# Most confidence gained from these tests, but generally take the most time, so restrict to tests with the best ROI.
+
+
+# ===============================================
+# staging
+# ===============================================
+
+# Essentially identical to production, potentially with less resource allocation
+# Can be used for Canary deployments, depending on use-case.
+
+
+# ===============================================
+# production
+# ===============================================
+
+prod-deploy-cloud-api:
+  stage: production
+  environment: production
+  variables:
+    AWS_ACCESS_KEY_ID: $PRD_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $PRD_AWS_SECRET_ACCESS_KEY
+    AWS_REGION: "ap-southeast-2"
+    RELEASE: $CI_COMMIT_SHORT_SHA
+    SERVERLESS_ACCESS_KEY: $SERVERLESS_ACCESS_KEY
+  image:
+    name: $CI_REGISTRY_IMAGE/sls:latest
+  before_script:
+    - echo "[prod-deploy-cloud-api]"
+  script:
+    - set -o allexport; source $SLS_ENV; set +o allexport
+    - ln -s /usr/src/node_modules $CI_PROJECT_DIR/cloud/api/node_modules
+    - cd $CI_PROJECT_DIR/api
+    - sls deploy -v --stage prod
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "production"'
+      changes:
+        - api/**/*
+      when: on_success
+
+prod-deploy-cloud-webapp:
+  stage: production
+  environment: production
+  variables:
+    AWS_ACCESS_KEY_ID: $PRD_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $PRD_AWS_SECRET_ACCESS_KEY
+    AWS_CF_DISTRIBUTION: $PRD_AWS_CF_DISTRIBUTION
+  image:
+    name: $CI_REGISTRY_IMAGE/cloud-webapp:base
+    entrypoint: [""]
+  before_script:
+    - echo "[prod-deploy-cloud-webapp]"
+  script:
+    - ln -s /src/node_modules $CI_PROJECT_DIR/cloud/webapp/node_modules
+    - cd $CI_PROJECT_DIR/cloud/webapp
+    - echo "build web app"
+    - npm run build
+    - echo "Sync web app files"
+    - AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY deploy-aws-s3-cloudfront --bucket app.example.com --react --distribution $AWS_CF_DISTRIBUTION --debug --non-interactive
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "production" || $CI_COMMIT_BRANCH == "app-deploy"'
+      changes:
+        - client/**/*
+      when: on_success
+
+
+# ===============================================
+# release
+# ===============================================
+
+# Update Sentry (https://sentry.io/) with release tag so any errors/issues
+# are assigned against this specific deployment.
+release-create-sentry-tag:
+  stage: release
+  environment: production
+  image:
+    name: getsentry/sentry-cli
+    entrypoint: [""]
+  before_script:
+    - echo "[release-create-sentry-tag]"
+  script:
+    - sentry-cli releases new
+      -p cloudapi-codes_get
+      -p cloudapi-config_get
+      -p cloudapi-messages_send
+      -p cloudapi-studies_create
+      -p cloudapi-studies_update
+      -p cloudapi-updates_get
+      -p cloudapi-updates_write
+      -p onprem-api
+      -p onprem-api_worker $CI_COMMIT_SHORT_SHA
+    - sentry-cli releases set-commits $CI_COMMIT_SHORT_SHA --auto
+    - sentry-cli releases finalize $CI_COMMIT_SHORT_SHA
+    - sentry-cli releases deploys $CI_COMMIT_SHORT_SHA new -e prod
+    - echo "Finalized release for $CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "production"'
+      when: on_success
